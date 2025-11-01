@@ -1,4 +1,3 @@
-import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -7,7 +6,6 @@ import re
 import time
 import json
 import os
-from datetime import datetime
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import Ridge
 
@@ -17,6 +15,9 @@ from sklearn.linear_model import Ridge
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/TON_WEBHOOK_ICI"  # 🔧 Mets ton webhook ici
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 SEEN_FILE = "seen.json"
+QUERY = "ps5"            # 🔧 Mot-clé de recherche
+LOCATION = "paris"       # 🔧 Ville ou région
+REFRESH_MINUTES = 10     # 🔧 Intervalle entre chaque recherche
 
 # -------------------------
 # OUTILS DE BASE
@@ -41,7 +42,10 @@ def get_ads(query, location, limit=30):
 
     ads = []
     for ad in soup.select("a[data-qa-id='aditem_container']")[:limit]:
-        title = ad.select_one("[data-qa-id='aditem_title']").text.strip()
+        title_elem = ad.select_one("[data-qa-id='aditem_title']")
+        if not title_elem:
+            continue
+        title = title_elem.text.strip()
         price_elem = ad.select_one("[data-qa-id='aditem_price']")
         price = extract_number(price_elem.text) if price_elem else None
         link = "https://www.leboncoin.fr" + ad["href"]
@@ -136,55 +140,36 @@ def envoyer_discord(annonce):
         print(f"Erreur d’envoi Discord : {e}")
 
 # -------------------------
-# INTERFACE STREAMLIT
+# BOUCLE PRINCIPALE
 # -------------------------
-st.set_page_config(page_title="Leboncoin Bons Plans Auto", page_icon="💸")
-st.title("💸 Détecteur automatique de bons plans Leboncoin")
-st.caption("Analyse, prédit, et envoie les bons plans sur Discord — automatiquement !")
-
-query = st.text_input("🔎 Mot-clé de recherche :", "ps5")
-location = st.text_input("📍 Ville ou région :", "paris")
-refresh_rate = st.number_input("⏱️ Intervalle de rafraîchissement (minutes) :", min_value=1, max_value=120, value=10)
-
-if "last_run" not in st.session_state:
-    st.session_state.last_run = 0
-
-if st.button("🚀 Lancer la recherche automatique"):
-    st.session_state.running = True
-
-if st.session_state.get("running", False):
-    current_time = time.time()
-    if current_time - st.session_state.last_run > refresh_rate * 60:
-        st.session_state.last_run = current_time
-        with st.spinner(f"Analyse en cours pour '{query}' à '{location}'..."):
-            df = get_ads(query, location)
+def main():
+    vues = charger_annonces_vues()
+    while True:
+        print(f"🔎 Scraping Leboncoin pour '{QUERY}' à '{LOCATION}'...")
+        df = get_ads(QUERY, LOCATION)
+        if df.empty:
+            print("⚠️ Aucune annonce trouvée.")
+        else:
+            df = filtrer_annonces(df)
             if df.empty:
-                st.warning("Aucune annonce trouvée.")
+                print("ℹ️ Aucune annonce de bonne qualité.")
             else:
-                df = filtrer_annonces(df)
-                if df.empty:
-                    st.info("Aucune annonce de bonne qualité trouvée.")
+                model, vectorizer = entrainer_modele(df.dropna(subset=["prix"]))
+                bons_plans = detecter_bons_plans(df, model, vectorizer)
+                nouveaux = [row for _, row in bons_plans.iterrows() if row["lien"] not in vues]
+
+                if not nouveaux:
+                    print("ℹ️ Aucun nouveau bon plan détecté pour le moment.")
                 else:
-                    model, vectorizer = entrainer_modele(df.dropna(subset=["prix"]))
-                    bons_plans = detecter_bons_plans(df, model, vectorizer)
-                    vues = charger_annonces_vues()
-                    nouveaux = [row for _, row in bons_plans.iterrows() if row["lien"] not in vues]
+                    print(f"✅ {len(nouveaux)} nouveaux bons plans trouvés !")
+                    for annonce in nouveaux:
+                        print(f"💰 {annonce['titre']} - {annonce['prix']} €")
+                        envoyer_discord(annonce)
+                        vues.add(annonce["lien"])
+                    sauvegarder_annonces_vues(vues)
 
-                    if not nouveaux:
-                        st.info("Aucun nouveau bon plan détecté pour le moment.")
-                    else:
-                        st.success(f"{len(nouveaux)} nouveaux bons plans trouvés ! 🎯")
-                        for annonce in nouveaux:
-                            st.markdown(
-                                f"**[{annonce['titre']}]({annonce['lien']})**  \n"
-                                f"💰 Prix : {annonce['prix']} € — Valeur estimée : {annonce['prix_estimé']:.0f} €  \n"
-                                f"📊 Score qualité : {annonce['qualité_score']}"
-                            )
-                            envoyer_discord(annonce)
-                            vues.add(annonce["lien"])
-                        sauvegarder_annonces_vues(vues)
+        print(f"⏳ Pause de {REFRESH_MINUTES} minutes...\n")
+        time.sleep(REFRESH_MINUTES * 60)
 
-        st.rerun()
-
-st.info("⏳ L’application se rafraîchira automatiquement toutes les "
-        f"{refresh_rate} minutes tant qu’elle reste ouverte.")
+if __name__ == "__main__":
+    main()
